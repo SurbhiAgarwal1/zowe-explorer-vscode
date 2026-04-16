@@ -2301,14 +2301,14 @@ export class DatasetActions {
             if (!Array.isArray(clipboardContent)) {
                 clipboardContent = [clipboardContent];
             } else {
-                clipboardContent = clipboardContent.flat();
+                clipboardContent = [].concat(...(clipboardContent as any[]));
             }
         } catch (err) {
             Gui.errorMessage(vscode.l10n.t("Invalid paste. Copy data set(s) first."));
             return;
         }
         if (clipboardContent[0] == null || typeof clipboardContent[0] !== "object" || !("dataSetName" in clipboardContent[0])) {
-            Gui.errorMessage(vscode.l10n.t("Cross-view paste is not supported. Copy data set(s) first before pasting into the Data Sets view."));
+            await Gui.errorMessage(vscode.l10n.t("Cross-view paste is not supported. Copy data set(s) first before pasting into the Data Sets view."));
             return;
         }
         if (SharedContext.isPds(clipboardContent[0].contextValue)) {
@@ -2333,7 +2333,7 @@ export class DatasetActions {
     public static async copySequentialDatasets(clipboardContent, node: ZoweDatasetNode): Promise<void> {
         ZoweLogger.trace("dataset.actions.copySequentialDatasets called.");
         const mvsApi = ZoweExplorerApiRegister.getMvsApi(node.getProfile());
-        const copiedcontent = clipboardContent.flat() as ClipboardItem[];
+        const copiedcontent = clipboardContent as ClipboardItem[];
         const groupedByProfile = DatasetActions.groupClipboardItemsByProfile(copiedcontent);
 
         const sameProfileItems = groupedByProfile.get(node.getProfile().name);
@@ -2353,7 +2353,7 @@ export class DatasetActions {
                             try {
                                 return await mvsApi.copyDataSet(lbl, dsname, null, replace === "replace");
                             } catch (error) {
-                                Gui.errorMessage(error.message);
+                                await Gui.errorMessage(error.message);
                                 return;
                             }
                         }
@@ -2814,7 +2814,7 @@ export class DatasetActions {
                 };
                 const dsname = await Gui.showInputBox(inputBoxOptions);
                 if (!dsname) {
-                    return;
+                    continue;
                 }
                 const profileName = node.profileName ?? nodes[0]?.profileName;
                 const profile = DatasetActions.getProfileByName(profileName);
@@ -2830,13 +2830,11 @@ export class DatasetActions {
                     await action(node, dsname, replace);
                 }
             } catch (error) {
-                if (error instanceof Error) {
-                    await AuthUtils.errorHandling(error, {
-                        apiType: ZoweExplorerApiType.Mvs,
-                        dsName: node.dataSetName,
-                        scenario: vscode.l10n.t("Unable to copy data set."),
-                    });
-                }
+                await AuthUtils.errorHandling(error as any, {
+                    apiType: ZoweExplorerApiType.Mvs,
+                    dsName: node.dataSetName,
+                    scenario: vscode.l10n.t("Unable to copy data set."),
+                });
             }
         }
     }

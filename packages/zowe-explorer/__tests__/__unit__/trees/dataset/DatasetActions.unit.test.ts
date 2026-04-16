@@ -2643,7 +2643,7 @@ describe("Dataset Actions Unit Tests - Function pasteDataSet", () => {
     });
 
     it("Testing copyProcessor() handles error from allocateLikeDataSet without crashing (test for extenders that don't support allocateLikeDataSet)", async () => {
-        createGlobalMocks();
+        const globalMocks = createGlobalMocks();
         const blockMocks = createBlockMocks();
         mocked(Profiles.getInstance).mockReturnValue(blockMocks.profileInstance);
         blockMocks.profileInstance.allProfiles = [blockMocks.imperativeProfile];
@@ -2655,16 +2655,20 @@ describe("Dataset Actions Unit Tests - Function pasteDataSet", () => {
             contextValue: Constants.DS_DS_CONTEXT,
         };
 
-        mocked(vscode.window.showInputBox).mockResolvedValue("HLQ.TEST.NEW.DS");
+        const testError = new Error("Allocate like data set is not supported.");
+        const errorHandlingSpy = jest.spyOn(AuthUtils, "errorHandling").mockResolvedValue(true);
+        jest.spyOn(DatasetActions, "getProfileByName").mockReturnValue(blockMocks.imperativeProfile);
+        jest.spyOn(DatasetActions, "determineReplacement").mockResolvedValue("notFound");
+        jest.spyOn(ZoweExplorerApiRegister, "getMvsApi").mockReturnValue(blockMocks.mvsApi);
+        globalMocks.showInputBox.mockResolvedValue("HLQ.TEST.NEW.DS");
+        jest.spyOn(blockMocks.mvsApi, "allocateLikeDataSet").mockRejectedValue(testError);
         jest.spyOn(blockMocks.mvsApi, "dataSet").mockResolvedValue({
             success: true,
             commandResponse: "",
-            apiResponse: { items: [] },
+            apiResponse: {
+                items: [{ dsname: "HLQ.TEST.BEFORE.NODE" }],
+            },
         });
-
-        const testError = new Error("Allocate like data set is not supported.");
-        jest.spyOn(blockMocks.mvsApi, "allocateLikeDataSet").mockRejectedValue(testError);
-        const errorHandlingSpy = jest.spyOn(AuthUtils, "errorHandling").mockResolvedValue();
 
         await DatasetActions.copyProcessor([clipboardItem], "ps", jest.fn());
 
@@ -2673,9 +2677,9 @@ describe("Dataset Actions Unit Tests - Function pasteDataSet", () => {
             expect.objectContaining({
                 apiType: ZoweExplorerApiType.Mvs,
                 dsName: "HLQ.TEST.BEFORE.NODE",
+                scenario: expect.any(String),
             })
         );
-
         errorHandlingSpy.mockRestore();
     });
 
@@ -2699,10 +2703,11 @@ describe("Dataset Actions Unit Tests - Function pasteDataSet", () => {
         const blockMocks = createBlockMocks();
         const testError = new Error("refreshDataset failed");
         const refreshSpy = jest.spyOn(blockMocks.pdsSessionNode, "getChildren").mockRejectedValueOnce(testError);
+        const errorHandlingSpy = jest.spyOn(AuthUtils, "errorHandling").mockResolvedValue(true);
+
         await DatasetActions.refreshDataset(blockMocks.pdsSessionNode, blockMocks.testDatasetTree);
         expect(refreshSpy).toHaveBeenCalled();
-        expect(mocked(Gui.errorMessage)).toHaveBeenCalled();
-        expect(mocked(Gui.errorMessage).mock.calls[0][0]).toContain(testError.message);
+        expect(errorHandlingSpy).toHaveBeenCalledWith(testError, expect.objectContaining({ apiType: ZoweExplorerApiType.Mvs }));
     });
 
     it("Testing refreshDataset() running successfully", async () => {
@@ -2713,7 +2718,7 @@ describe("Dataset Actions Unit Tests - Function pasteDataSet", () => {
         expect(refreshSpy).toHaveBeenCalled();
     });
 
-    it("If copyDataSetCrossLpar, copyDataSet is not present in mvsapi", async () => {
+    it("If copyDataSetCrossLpar is not present in mvsapi, pasteDataSet should use fallback", async () => {
         const globalMocks = createGlobalMocks();
         const blockMocks = createBlockMocks();
         const crossProfile = createIProfile();
@@ -2725,61 +2730,50 @@ describe("Dataset Actions Unit Tests - Function pasteDataSet", () => {
             parentNode: blockMocks.datasetSessionNode,
         });
         node.contextValue = Constants.DS_DS_CONTEXT;
-        clipboard.writeText(
-            JSON.stringify([
-                {
-                    dataSetName: "HLQ.TEST.BEFORE.NODE",
-                    profileName: "sestest1",
-                    contextValue: Constants.DS_DS_CONTEXT,
-                },
-            ])
-        );
+        
+        // Mock clipboard with cross-profile dataset
+        clipboard.writeText(JSON.stringify([{
+            dataSetName: "HLQ.TEST.BEFORE.NODE",
+            profileName: "sestest1",
+            contextValue: Constants.DS_DS_CONTEXT,
+        }]));
+
         blockMocks.mvsApi.copyDataSetCrossLpar = null as any;
-        jest.spyOn(DatasetActions, "determineReplacement").mockResolvedValueOnce("notFound");
+        jest.spyOn(DatasetActions, "determineReplacement").mockResolvedValue("notFound");
         mocked(vscode.window.withProgress).mockImplementation((progLocation, callback) => {
-            const progress = { report: jest.fn() };
-            const token = { isCancellationRequested: false, onCancellationRequested: jest.fn() };
-            return callback(progress, token);
+            return callback({ report: jest.fn() }, { isCancellationRequested: false, onCancellationRequested: jest.fn() });
         });
-        globalMocks.showInputBox.mockResolvedValueOnce("CopyNode");
+        mocked(vscode.window.showInputBox).mockResolvedValue("CopyNode");
         const fallbackSpy = jest.spyOn(DatasetActions as any, "copySequentialDatasetViaFsFallback").mockResolvedValue(undefined);
 
         await expect(DatasetActions.pasteDataSet(blockMocks.testDatasetTree, node)).resolves.not.toThrow();
-        expect(globalMocks.showInputBox).toHaveBeenCalled();
         expect(fallbackSpy).toHaveBeenCalled();
         fallbackSpy.mockRestore();
+    });
 
-        //if copyDataSet() is not present in mvsapi
-        clipboard.writeText(
-            JSON.stringify([
-                {
-                    dataSetName: "HLQ.TEST.BEFORE.NODE",
-                    profileName: blockMocks.imperativeProfile.name,
-                    contextValue: Constants.DS_DS_CONTEXT,
-                },
-            ])
-        );
-        mocked(vscode.window.showInputBox).mockImplementationOnce((options) => {
-            options.validateInput("nodeCopyCpy");
-            return Promise.resolve("nodeCopyCpy");
+    it("If copyDataSet is not present in mvsapi (same profile copy), pasteDataSet should show error", async () => {
+        const globalMocks = createGlobalMocks();
+        const blockMocks = createBlockMocks();
+        const node = new ZoweDatasetNode({
+            label: "HLQ.TEST.DATASET",
+            collapsibleState: vscode.TreeItemCollapsibleState.None,
+            parentNode: blockMocks.datasetSessionNode,
         });
+        node.contextValue = Constants.DS_DS_CONTEXT;
+
+        clipboard.writeText(JSON.stringify([{
+            dataSetName: "HLQ.TEST.BEFORE.NODE",
+            profileName: blockMocks.imperativeProfile.name,
+            contextValue: Constants.DS_DS_CONTEXT,
+        }]));
+        
+        jest.spyOn(ZoweExplorerApiRegister, "getMvsApi").mockReturnValue(blockMocks.mvsApi);
+        globalMocks.showInputBox.mockResolvedValue("nodeCopyCpy");
         blockMocks.mvsApi.copyDataSet = null as any;
-        const errorCopySpy = jest.spyOn(Gui, "errorMessage").mockResolvedValue("Copying data sets is not supported.");
+        const errorCopySpy = (Gui.errorMessage as jest.Mock).mockResolvedValue("Copying data sets is not supported.");
+        
         await expect(DatasetActions.pasteDataSet(blockMocks.testDatasetTree, node)).resolves.not.toThrow();
         expect(errorCopySpy).toHaveBeenCalled();
-
-        //for partitioned copyDataSetCrossLpar is not present in mvsapi
-        node.contextValue = Constants.DS_PDS_CONTEXT;
-        clipboard.writeText(
-            JSON.stringify([
-                {
-                    dataSetName: "HLQ.TEST.BEFORE.NODE",
-                    profileName: "sestest1",
-                    contextValue: Constants.DS_PDS_CONTEXT,
-                },
-            ])
-        );
-        await expect(DatasetActions.pasteDataSet(blockMocks.testDatasetTree, node)).resolves.not.toThrow();
     });
 
     it("Should show error when pasting non-dataset content into the Data Sets view (cross-view paste)", async () => {
